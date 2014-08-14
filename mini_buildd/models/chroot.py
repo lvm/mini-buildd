@@ -66,9 +66,19 @@ go to the default mapping.
               "description": """
 <b>Supported extra options</b>
 <p><tt>Debootstrap-Command: ALT_COMMAND</tt>: Alternate command to run instead of standard debootstrap.</p>
+<p><tt>Debootstrap-Codename: ALT_CODENAME</tt>: Alternate codename to use instead of the chroot's one.</p>
+<p><tt>Debootstrap-Archive: ALT_ARCHIVE</tt>: Alternate URL to use instead of the chroot's one.</p>
 <p>
 For example, <tt>Debootstrap-Command: /usr/sbin/qemu-debootstrap</tt> may be used to produce <em>armel</em>
 chroots (with <tt>qemu-user-static</tt> installed).
+</p>
+<p>
+For example, <tt>Debootstrap-Codename: sid</tt> may be used to produce a <em>sid</em>
+chroot (when creating one for other distro than Debian).
+</p>
+<p>
+For example, <tt>Debootstrap-Archive: http://ftp.debian.org/debian</tt> may be used to produce a <em>Debian</em>
+chroot (when using other distro's repositories for the chroot).
 </p>
 """,
               "fields": ("extra_options",)})]
