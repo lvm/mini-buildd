@@ -159,9 +159,10 @@ chroots (with <tt>qemu-user-static</tt> installed).
               "--keyring={k}".format(k=self.mbd_get_keyring_file()),
               "--arch={a}".format(a=self.architecture.name),
               "--include=sudo",
-              self.source.codename,
+              self.mbd_get_extra_option("Debootstrap-Codename", self.source.codename),
               self.mbd_get_tmp_dir(),
-              self.source.mbd_get_archive().url],
+              self.mbd_get_extra_option("Debootstrap-Archive", self.source.mbd_get_archive().url)],
+
              ["/bin/umount", "-v", os.path.join(self.mbd_get_tmp_dir(), "proc"), os.path.join(self.mbd_get_tmp_dir(), "sys")]),
 
             (["/bin/cp", "--verbose", self.mbd_get_sudoers_workaround_file(), "{m}/etc/sudoers".format(m=self.mbd_get_tmp_dir())],
