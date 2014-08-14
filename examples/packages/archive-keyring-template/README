@@ -1,1 +1,29 @@
-This is an automated keyring package for a mini-buildd archive.
+mini-buildd archive "%ID%"
+==========================
+
+This is the automatic archive keyring package for mini-buildd archive "%ID%".
+
+APT "sources.list" library
+--------------------------
+
+This package also includes::
+
+	/usr/share/mini-buildd/sources.list.d/
+
+which has one file for any APT line available in this
+repository, using this::
+
+	CODENAME_ARCHIVE_REPOSITORY_SUITE[-rollbackN][_src].list
+
+naming scheme.
+
+This means you can easily select any available APT source via
+symlinks in "/etc/apt/sources.list.d/".
+
+.. note::
+
+	 These sources will only work out of the box if you
+	 have network access to archive "%ID%".
+
+	 I.e., you will still need to fiddle your own in case you are
+	 using a mirror.

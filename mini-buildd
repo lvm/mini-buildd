@@ -5,62 +5,102 @@ from __future__ import unicode_literals
 import signal
 import os
 import pwd
+import contextlib
 import argparse
 import sys
-import daemon
 import logging
 import logging.handlers
+
+# PEP 3143
+import daemon
+import daemon.pidlockfile
+import daemon.runner
+
+import argcomplete
 
 import mini_buildd.misc
 import mini_buildd.setup
 import mini_buildd.httpd
-import mini_buildd.webapp
+import mini_buildd.django_settings
 
 LOG = logging.getLogger("mini_buildd")
 LOG.addHandler(logging.StreamHandler())
 
 
-class Main():
+class PIDFile(object):
+    """
+    Pidfile with automtic stale fixup.
+
+    This uses code from the PEP 3143 reference
+    implementation.
+
+    .. note:: Stale recognition does not work when another unrelated process has reclaimed the pid from the stale pidfile.
+    .. note:: Creates an extra empty file HOST-MainThread-PID in the same directory as the pidfile (what's this for?).
+    """
+    def __init__(self, pidfile_path, acquire_timeout=5):
+        self.pidfile = daemon.runner.make_pidlockfile(pidfile_path, acquire_timeout)
+        if daemon.runner.is_pidfile_stale(self.pidfile):
+            LOG.warn("Fixing STALE PID file: {p}".format(p=self))
+            self.pidfile.break_lock()
+        self.pidfile.acquire(timeout=acquire_timeout)
+
+    def __unicode__(self):
+        return "{f} ({p})".format(f=self.pidfile.path, p=self.pidfile.read_pid())
+
+    def close(self):
+        self.pidfile.release()
+
+
+class Main(object):
     @classmethod
     def _parse_args(cls):
         parser = argparse.ArgumentParser(prog="mini-buildd",
                                          description="Minimal Debian build daemon.",
                                          formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-        parser.add_argument('--version', action='version', version=mini_buildd.__version__)
+        parser.add_argument("--version", action="version", version=mini_buildd.__version__)
 
         group_conf = parser.add_argument_group("daemon arguments")
-        group_conf.add_argument("-W", "--httpd-bind", action='store', default="0.0.0.0:8066",
+        group_conf.add_argument("-W", "--httpd-bind", action="store", default="0.0.0.0:8066",
                                 help="Web Server IP/Hostname and port to bind to.")
-        group_conf.add_argument("-H", "--home", action='store', default=os.getenv('HOME'),
+        group_conf.add_argument("-S", "--smtp", action="store", default=":@smtp://localhost:25",
+                                help="SMTP credentials in format '[USER]:[PASSWORD]@smtp|ssmtp://HOST:PORT'.")
+        group_conf.add_argument("-U", "--dedicated-user", action="store", default="mini-buildd",
+                                help="Force a custom dedicated user name (to run as a different user than 'mini-buildd').")
+        group_conf.add_argument("-H", "--home", action="store", default=os.getenv("HOME"),
                                 help="Run with this home dir. The only use case to change this for debugging, really.")
-        group_conf.add_argument("-f", "--foreground", action='store_true',
+        group_conf.add_argument("-F", "--pidfile", action="store", default=os.path.join(os.getenv("HOME"), ".mini-buildd.pid"),
+                                help="Set pidfile path.")
+        group_conf.add_argument("-f", "--foreground", action="store_true",
                                 help="Don't daemonize, log to console.")
 
         group_log = parser.add_argument_group("logging and debugging arguments")
-        group_log.add_argument("-v", "--verbose", dest="verbosity", action='count', default=0,
+        group_log.add_argument("-v", "--verbose", dest="verbosity", action="count", default=0,
                                help="Lower log level. Give twice for max logs.")
-        group_log.add_argument("-q", "--quiet", dest="terseness", action='count', default=0,
+        group_log.add_argument("-q", "--quiet", dest="terseness", action="count", default=0,
                                help="Tighten log level. Give twice for min logs.")
-        group_log.add_argument("-l", "--loggers", action='store', default="file,syslog",
+        group_log.add_argument("-l", "--loggers", action="store", default="file,syslog",
                                help="Comma-separated list of loggers (file,syslog,console) to use.")
-        group_log.add_argument("-d", "--debug", action='store', default="", metavar="PART,..",
+        group_log.add_argument("-d", "--debug", action="store", default="", metavar="OPTION,..",
                                help="""\
-Comma-separated list of parts to put in 'debug mode'. Available parts:
-exception (log tracebacks in master exception handlers),
-django (put django app in debug mode),
-builder (don't delete builder spool directories)""")
+Comma-separated list of special debugging options:
+'exception' (log tracebacks in exception handlers),
+'http' (put http server [cherrypy] in debug mode),
+'webapp' (put web application [django] in debug mode),
+'keep' (keep spool and temporary directories),
+'profile' (produce cProfile dump in log directory).""")
 
         group_db = parser.add_argument_group("database arguments")
-        group_db.add_argument("-P", "--set-admin-password", action='store', metavar="PASSWORD",
+        group_db.add_argument("-P", "--set-admin-password", action="store", metavar="PASSWORD",
                               help="Update password for django superuser named 'admin'; user is created if non-existent yet.")
-        group_db.add_argument("-D", "--dumpdata", action='store', metavar="APP[.MODEL]",
+        group_db.add_argument("-D", "--dumpdata", action="store", metavar="APP[.MODEL]",
                               help="Dump database contents for app[.MODEL] as JSON file (see 'django-admin dumpdata').")
-        group_db.add_argument("-L", "--loaddata", action='store', metavar="FILE",
+        group_db.add_argument("-L", "--loaddata", action="store", metavar="FILE",
                               help="INTERNAL USE ONLY, use with care! Load JSON file into database (see 'django-admin loaddata').")
-        group_db.add_argument("-R", "--remove-system-artifacts", action='store_true',
-                              help="INTERNAL USE ONLY, use with care! Bulk-unprepare all objects that might have produced artifacts on the system.")
+        group_db.add_argument("-R", "--remove-system-artifacts", action="store_true",
+                              help="INTERNAL USE ONLY, use with care! Bulk-remove associated data of all objects that might have produced artifacts on the system.")
 
+        argcomplete.autocomplete(parser)
         args = parser.parse_args()
 
         # Arguments that imply foreground mode
@@ -75,6 +115,7 @@ builder (don't delete builder spool directories)""")
         propagate through.
         """
         mini_buildd.setup.DEBUG = self._args.debug.split(",")
+        mini_buildd.setup.FOREGROUND = self._args.foreground
 
         mini_buildd.setup.HTTPD_BIND = self._args.httpd_bind
 
@@ -85,69 +126,114 @@ builder (don't delete builder spool directories)""")
 
         vardir = os.path.join(self._args.home, "var")
         mini_buildd.setup.LOG_DIR = os.path.join(vardir, "log")
+        mini_buildd.setup.LOG_FILE = os.path.join(mini_buildd.setup.LOG_DIR, "daemon.log")
+        mini_buildd.setup.ACCESS_LOG_FILE = os.path.join(mini_buildd.setup.LOG_DIR, "access.log")
         mini_buildd.setup.CHROOTS_DIR = os.path.join(vardir, "chroots")
         mini_buildd.setup.CHROOT_LIBDIR = os.path.join("libdir")
         mini_buildd.setup.SPOOL_DIR = os.path.join(vardir, "spool")
+        mini_buildd.setup.TMP_DIR = os.path.join(vardir, "tmp")
 
-        if os.path.exists("./build/sphinx/html"):
-            # A bit clumsy, but should work: Seems to be a development run
-            mini_buildd.setup.MANUAL_DIR = os.path.realpath("./build/sphinx/html")
-        else:
-            mini_buildd.setup.MANUAL_DIR = os.path.realpath("/usr/share/doc/mini-buildd/html")
+        # Hardcoded to the Debian path atm
+        mini_buildd.setup.MANUAL_DIR = os.path.realpath("/usr/share/doc/mini-buildd/html")
 
         # Create base directories
         mini_buildd.misc.mkdirs(mini_buildd.setup.INCOMING_DIR)
         mini_buildd.misc.mkdirs(mini_buildd.setup.REPOSITORIES_DIR)
         mini_buildd.misc.mkdirs(mini_buildd.setup.LOG_DIR)
+        mini_buildd.misc.mkdirs(mini_buildd.setup.TMP_DIR)
+
+    LOG_FORMAT = "%(name)-29s(%(lineno)04d): %(levelname)-8s: %(message)s"
+
+    def _log_handler_file(self):
+        handler = logging.handlers.RotatingFileHandler(
+            mini_buildd.setup.LOG_FILE,
+            maxBytes=5000000,
+            backupCount=9,
+            encoding="UTF-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s " + self.LOG_FORMAT))
+        return handler
+
+    def _log_handler_syslog(self):
+        handler = logging.handlers.SysLogHandler(
+            address="/dev/log".encode("UTF-8"),
+            facility=logging.handlers.SysLogHandler.LOG_USER)
+        handler.setFormatter(logging.Formatter(self.LOG_FORMAT))
+        return handler
+
+    def _log_handler_console(self):
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s " + self.LOG_FORMAT))
+        return handler
 
     def _setup_logging(self):
         loggers = self._args.loggers.split(",")
         if self._args.foreground:
             loggers.append("console")
 
-        log_format = "%(name)-29s(%(lineno)03d): %(levelname)-8s: %(message)s"
-
         # Clear all loggers now; this will remove the
         # preliminary console logger
         LOG.handlers = []
 
-        if "file" in loggers:
-            handler = logging.FileHandler(os.path.join(mini_buildd.setup.LOG_DIR, "daemon.log"))
-            handler.setFormatter(logging.Formatter("%(asctime)s " + log_format))
-            LOG.addHandler(handler)
+        # Try to add all loggers; collect exceptions to be able
+        # to do error reporting later, when hopefully one valid
+        # handler is set up.
+        loggers_failed = {}
+        for typ in loggers:
+            try:
+                handler_func = getattr(self, "_log_handler_" + typ)
+                LOG.addHandler(handler_func())
+            except Exception as e:
+                loggers_failed[typ] = e
 
-        if "syslog" in loggers:
-            handler = logging.handlers.SysLogHandler(address="/dev/log".encode("UTF-8"), facility=logging.handlers.SysLogHandler.LOG_USER)
-            handler.setFormatter(logging.Formatter(log_format))
-            LOG.addHandler(handler)
-
-        if "console" in loggers:
-            handler = logging.StreamHandler()
-            handler.setFormatter(logging.Formatter("%(asctime)s " + log_format))
-            LOG.addHandler(handler)
-
-        # Finally, set log level
+        # Set log level
         loglevel = logging.WARNING - (10 * (min(2, self._args.verbosity) - min(2, self._args.terseness)))
         LOG.setLevel(loglevel)
 
         # Global: Don't propagate exceptions that happen while logging
         logging.raiseExceptions = 0
 
+        # Finally, log all errors now that occurred while setting up loggers
+        for typ, err in loggers_failed.items():
+            LOG.critical("Logger {t} failed: {e}".format(t=typ, e=err))
+
+        return loglevel
+
     def _setup_environment(self):
         os.environ.clear()
         os.environ["HOME"] = self._args.home
         os.environ["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+        os.environ["LANG"] = "C.UTF-8"
         for name in ["USER", "LOGNAME"]:
-            os.environ[name] = pwd.getpwuid(os.getuid())[0]
+            os.environ[name] = self._user
+
+    def is_extra_run(self):
+        "Called as non-daemon, non-HTTP server extra runs."
+        return self._args.set_admin_password or self._args.remove_system_artifacts or self._args.loaddata or self._args.dumpdata
 
     def __init__(self):
+        self._user = pwd.getpwuid(os.getuid())[0]
+
         self._args = self._parse_args()
+
+        # User sanity check
+        if self._args.dedicated_user != self._user:
+            raise Exception("Run as dedicated user only (use '--dedicated-user={u}' if you really want this, will write to that user's $HOME!)".format(u=self._user))
+
+        if not self.is_extra_run():
+            # Pre-daemonize check if HTTP port is ready to bind (else cherrypy fails strangely later)
+            mini_buildd.misc.HoPo(self._args.httpd_bind).test_bind()
+            # Pre-daemonize check if shm is usable on the system (else pyftpdlib fails strangely later)
+            mini_buildd.misc.check_multiprocessing()
+
         # Daemonize early
         if not self._args.foreground:
             daemon.DaemonContext(working_directory=self._args.home, umask=0022).open()
         self._setup()
-        self._setup_logging()
+        self._loglevel = self._setup_logging()
         self._setup_environment()
+
+        # Configure django
+        mini_buildd.django_settings.configure(self._args.smtp, self._loglevel)
 
         # Shutdown on SIGTERM or SIGINT
         self._status = "RESTART"
@@ -162,9 +248,29 @@ builder (don't delete builder spool directories)""")
         elif signum == signal.SIGHUP:
             self._status = "RESTART"
 
+    def run_daemon(self, webapp):
+        # Start httpd webapp
+        mini_buildd.misc.run_as_thread(mini_buildd.httpd.run, daemon=True, bind=self._args.httpd_bind, wsgi_app=webapp)
+
+        # Get the daemon manager instance (import here: We cannot import anything 'django' prior to django's configuration)
+        from mini_buildd.daemon import Daemon
+        daemon = Daemon()
+        daemon.start()
+
+        while True:
+            signal.pause()
+            if self._status == "RESTART":
+                daemon.stop()
+                daemon.start()
+            else:
+                break
+
+        daemon.stop()
+
     def run(self):
-        # Get the django project instance
-        webapp = mini_buildd.webapp.WebApp()
+        # Get the django project instance (import here: We cannot import anything 'django' prior to django's configuration)
+        from mini_buildd.webapp import WebApp
+        webapp = WebApp()
 
         # Extra options that exit without running as daemon
         if self._args.set_admin_password:
@@ -176,32 +282,20 @@ builder (don't delete builder spool directories)""")
         elif self._args.dumpdata:
             webapp.dumpdata(self._args.dumpdata)
         else:
-            # Get the daemon manager instance (due to django, import must be here)
-            from mini_buildd.daemon import Daemon
-            daemon = Daemon()
-
-            # Start httpd webapp
-            mini_buildd.misc.run_as_thread(mini_buildd.httpd.run, daemon=False, bind=self._args.httpd_bind, wsgi_app=webapp)
-
-            while True:
-                signal.pause()
-                if self._status == "RESTART":
-                    if daemon.is_running():
-                        try:
-                            daemon.restart()
-                        except Exception as e:
-                            mini_buildd.setup.log_exception(LOG, "Could not restart daemon", e)
-                    else:
-                        LOG.warn("Daemon not active (not restarted).")
-                else:
-                    break
-
-            daemon.stop()
-            mini_buildd.httpd.shutdown()
+            with contextlib.closing(PIDFile(self._args.pidfile)) as pidfile:
+                LOG.info("Starting daemon with pidfile: {p}".format(p=pidfile))
+                self.run_daemon(webapp)
 
 
 try:
-    Main().run()
+    MAIN = Main()
+    if "profile" in mini_buildd.setup.DEBUG:
+        PROFILE = os.path.join(mini_buildd.setup.LOG_DIR, "daemon.profile")
+        LOG.warn("PROFILE DEBUG MODE: Profiling to '{p}'".format(p=PROFILE))
+        import cProfile
+        cProfile.run("MAIN.run()", PROFILE)
+    else:
+        MAIN.run()
 except Exception as e:
     mini_buildd.setup.log_exception(LOG, "mini-buildd FAILED", e)
     sys.exit(1)

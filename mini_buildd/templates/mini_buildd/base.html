@@ -1,41 +1,62 @@
-{% load base %}
-<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+{% extends "base.html" %}
 
-<html xmlns="http://www.w3.org/1999/xhtml">
-	<head>
-		<meta http-equiv="content-type" content="text/html; charset=utf-8" />
-		<link rel="shortcut icon" href="/static/favicon.ico" />
-		<link rel="stylesheet" type="text/css" href="/static/css/mini-buildd.css" />
-		<script src="/static/admin/js/jquery.js" type="text/javascript"></script>
-		<script type="text/javascript">
-			{% block localscript %}{% endblock %}
-		</script>
-		<title>{% block title %}mini-buildd{% endblock %}{% block mbd_page_title %}{% endblock %}</title>
-	</head>
-	<body>
-		<!-- Header -->
-		<div id="mb_header">
-			<div id="mb_branding">
-				<a class="image" title="Mini-buildd Home" href="/"><img src="/static/images/icon_48x48.png" alt="mini-buildd logo" /></a>
+{% block page_header %}
+	<div class="left">
+		<div class="menu_title">
+			Page
+		</div>
+		{% if api_cmd.args.package %}
+			{% with api_cmd.args.package as package %}
+				<a href="/mini_buildd/api?command=show&amp;package={{ package|urlencode }}" title="Show {{ package }} source package">Show package</a>
+				<br />
+				<a href="https://tracker.debian.org/pkg/{{ package|urlencode }}" title="Show {{ package }} source package in the Debian Package Tracker">Show Debian</a>
+				(<a href="http://packages.qa.debian.org/common/index.html?src={{ package|urlencode }}" title="Show {{ package }} source package in the (traditional) Debian PTS">Old</a>)
+				<br />
+			{% endwith %}
+		{% endif %}
+		{% if api_cmd %}
+			<hr />
+			<a href="/mini_buildd/api?command={{ api_cmd.COMMAND|urlencode }}&amp;{% for k, v in api_cmd.args.items %}{{ k|urlencode }}={{ v|urlencode }}&amp;{% endfor %}output=plain" title="This API call with plain output">API: plain</a>
+			<br />
+			<a href="/mini_buildd/api?command={{ api_cmd.COMMAND|urlencode }}&amp;{% for k, v in api_cmd.args.items %}{{ k|urlencode }}={{ v|urlencode }}&amp;{% endfor %}output=python" title="This API call with python output">API: python</a>
+			<br />
+		{% endif %}
+	</div>
+	<div class="center">
+		<div class="title">{% block page_title %}{% endblock %}</div><div class="sub_title">{% block page_sub_title %}{% endblock %}</div>
+	</div>
+	<div class="right">
+		<div class="menu_title">
+			Packages
+		</div>
+		<form action="/mini_buildd/api" method="get">
+			<div>
+				<input type="hidden" name="command" value="show" />
+				<input type="text" name="package" size="12" value="{{ api_cmd.args.package }}" title="Source package name." />
+				<input type="submit" value="Show" title="Show source package" style="width: 4em"/>
 			</div>
-			<div id="mb_navigation">
-				<ul>
-					<li class="first"><a href="/mini_buildd/">Home</a></li>
-					<li><a href="/admin/">Configure</a></li>
-					<li><a href="/manual/index.html">Documentation</a></li>
-					<li><a href="/mini_buildd/download/archive.key">Download Archive Key</a></li>
-					<li><a href="/mini_buildd/download/dput.cf">Download Dput Config</a></li>
-					<li><a href="/log/daemon.log">View daemon log</a></li>
-				</ul>
+		</form>
+		<form action="/mini_buildd/api" method="get">
+			<div>
+				<input type="hidden" name="command" value="list" />
+				<input type="text" name="pattern" size="12" value="{{ api_cmd.args.pattern }}" title="Source or binary package name pattern (shell-like glob)." />
+				<input type="submit" value="List" title="List packages matching pattern" style="width: 4em" />
 			</div>
+		</form>
+	</div>
+
+	{% if api_cmd.args %}
+		<div class="right">
+			<form action="/mini_buildd/api" method="get">
+				<div>
+					<input type="hidden" name="command" value="{{ api_cmd.COMMAND }}" />
+					{% for k, v in api_cmd.args.items %}
+						<input type="text" title="{{ k }}" size="8" name="{{ k }}" value="{{ v }}" />
+					{% endfor %}
+					<input type="submit" value="Refine" title="Refined API call" style="width: 4em" />
+				</div>
+			</form>
 		</div>
-		<!-- Content -->
-		<div id="mb_content">
-			{% block content %}{% endblock %}
-		</div>
-		<!-- Footer -->
-		<div id="mb_footer">
-			<p><a class="homelink" title="Mini-buildd Home" href="/mini_buildd/">{% mbd_version %}</a><span class="page-footer">{% block mbd_page_footer %}{% endblock %}</span></p>
-		</div>
-	</body>
-</html>
+	{% endif %}
+
+{% endblock %}

@@ -1,13 +1,27 @@
 #!/usr/bin/make -f
 
-export DH_VERBOSE = 1
+#export DH_VERBOSE = 1
 
 %:
-	dh $@ --with=python2
+	dh $@ --with=python2,sphinxdoc
 
-override_dh_installdocs:
+override_dh_auto_build:
+	dh_auto_build
 	python setup.py build_sphinx --source-dir=build/sphinx
-	dh_installdocs build/sphinx/html
+
+	# Create bash completion scripts via python-argcomplete
+	register-python-argcomplete mini-buildd | sed 's/_python_argcomplete/_mini_buildd_argcomplete/g' >build/mini-buildd.bash-completion
+	register-python-argcomplete mini-buildd-tool | sed 's/_python_argcomplete/_mini_buildd_tool_argcomplete/g' >build/mini-buildd-tool.bash-completion
+
+	# Code to enable latex+pdf manual: Deps: texlive-latex-extra texlive-fonts-recommended
+	#sphinx-build -b latex ./build/sphinx ./build/sphinx/latex
+	#make --directory ./build/sphinx/latex
+
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+override_dh_auto_test:
+	dh_auto_test
+	./devel pydoctests
+endif
 
 override_dh_auto_clean:
 	dh_auto_clean
@@ -16,3 +30,7 @@ override_dh_auto_clean:
 override_dh_fixperms:
 	dh_fixperms
 	chmod 440 debian/mini-buildd/etc/sudoers.d/mini-buildd-sudoers
+
+# Don't compress anything in examples, so scripts and packages can be used as-is.
+override_dh_compress:
+	dh_compress -X examples/

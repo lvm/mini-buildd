@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
 
+import copy
 import os
 import shutil
+import contextlib
 import glob
 import logging
 
@@ -16,6 +18,7 @@ import mini_buildd.misc
 import mini_buildd.models.base
 import mini_buildd.models.source
 
+from mini_buildd.models.msglog import MsgLog
 LOG = logging.getLogger(__name__)
 
 
@@ -60,11 +63,55 @@ go to the default mapping.
             ("Chroot identity", {"fields": (("source", "architecture"), "personality", "personality_override")}),
             ("Extra options",
              {"classes": ("collapse",),
-              "description": "Supported extra options: 'Debootstrap-Command: Alternate command to run instead of standard debootstrap'",
+              "description": """
+<b>Supported extra options</b>
+<p><tt>Debootstrap-Command: ALT_COMMAND</tt>: Alternate command to run instead of standard debootstrap.</p>
+<p>
+For example, <tt>Debootstrap-Command: /usr/sbin/qemu-debootstrap</tt> may be used to produce <em>armel</em>
+chroots (with <tt>qemu-user-static</tt> installed).
+</p>
+""",
               "fields": ("extra_options",)})]
 
+        def get_readonly_fields(self, _request, obj=None):
+            "Forbid change source/arch on existing chroot (we would loose the path to the associated data)."
+            fields = copy.copy(self.readonly_fields)
+            if obj:
+                fields.append("source")
+                fields.append("architecture")
+            return fields
+
+        @classmethod
+        def mbd_host_architecture(cls):
+            return mini_buildd.misc.sose_call(["dpkg", "--print-architecture"]).strip()
+
+        @classmethod
+        def _mbd_get_supported_archs(cls, arch):
+            "Some archs also natively support other archs."
+            arch_map = {"amd64": ["i386"]}
+            return [arch] + arch_map.get(arch, [])
+
+        @classmethod
+        def _mbd_meta_add_base_sources(cls, chroot_model, msglog):
+            "Add chroot objects for all base sources found."
+            archs = mini_buildd.models.source.Architecture.mbd_supported_architectures()
+            msglog.info("Host supports {archs}".format(archs=" ".join(archs)))
+
+            for s in mini_buildd.models.source.Source.Admin.mbd_filter_active_base_sources():
+                for a in mini_buildd.models.source.Architecture.objects.filter(name__regex=r"^({archs})$".format(archs="|".join(archs))):
+                    try:
+                        extra_options = ""
+                        if s.codename in ["lenny", "etch"]:
+                            extra_options = "Debootstrap-Command: /usr/sbin/mbd-debootstrap-uname-2.6\n"
+                        chroot_model.mbd_get_or_create(msglog, source=s, architecture=a, extra_options=extra_options)
+                    except:
+                        msglog.info("Another backend already provides {s}/{a}".format(s=s.codename, a=a.name))
+
     def __unicode__(self):
-        return "{c}/{a} ({s})".format(c=self.source.codename, a=self.architecture.name, s=self.mbd_get_status_display())
+        return "{o} '{c}:{a}' ({f})".format(o=self.source.origin,
+                                            c=self.source.codename,
+                                            a=self.architecture.name,
+                                            f=self.mbd_get_backend().mbd_backend_flavor())
 
     def mbd_get_backend(self):
         for cls, sub in {"filechroot": [], "dirchroot": [], "lvmchroot": ["looplvmchroot"]}.items():
@@ -88,19 +135,33 @@ go to the default mapping.
     def mbd_get_schroot_conf_file(self):
         return os.path.join(self.mbd_get_path(), "schroot.conf")
 
+    def mbd_get_keyring_file(self):
+        "Holds all keys from the source to verify the release via debootstrap's --keyring option."
+        return os.path.join(self.mbd_get_path(), "keyring.gpg")
+
     def mbd_get_system_schroot_conf_file(self):
         return os.path.join("/etc/schroot/chroot.d", self.mbd_get_name() + ".conf")
 
     def mbd_get_sudoers_workaround_file(self):
         return os.path.join(self.mbd_get_path(), "sudoers_workaround")
 
+    def mbd_get_pre_sequence(self):
+        "Subclasses may implement this to do define an extra preliminary sequence."
+        LOG.debug("{c}: No pre-sequence defined.".format(c=self))
+        return []
+
     def mbd_get_sequence(self):
         return [
             (["/bin/mkdir", "--verbose", self.mbd_get_tmp_dir()],
              ["/bin/rm", "--recursive", "--one-file-system", "--force", self.mbd_get_tmp_dir()])] + self.mbd_get_backend().mbd_get_pre_sequence() + [
             ([self.mbd_get_extra_option("Debootstrap-Command", "/usr/sbin/debootstrap"),
-              "--variant=buildd", "--arch={a}".format(a=self.architecture.name), "--include=sudo",
-              self.source.codename, self.mbd_get_tmp_dir(), self.source.mbd_get_archive().url],
+              "--variant=buildd",
+              "--keyring={k}".format(k=self.mbd_get_keyring_file()),
+              "--arch={a}".format(a=self.architecture.name),
+              "--include=sudo",
+              self.source.codename,
+              self.mbd_get_tmp_dir(),
+              self.source.mbd_get_archive().url],
              ["/bin/umount", "-v", os.path.join(self.mbd_get_tmp_dir(), "proc"), os.path.join(self.mbd_get_tmp_dir(), "sys")]),
 
             (["/bin/cp", "--verbose", self.mbd_get_sudoers_workaround_file(), "{m}/etc/sudoers".format(m=self.mbd_get_tmp_dir())],
@@ -153,18 +214,68 @@ personality={p}
 {b}
 """.format(n=self.mbd_get_name(), p=self.personality, b=self.mbd_get_backend().mbd_get_schroot_conf())).save()
 
+        # Gen keyring file to use with debootstrap
+        with contextlib.closing(mini_buildd.gnupg.TmpGnuPG()) as gpg:
+            for k in self.source.apt_keys.all():
+                gpg.add_pub_key(k.key)
+            gpg.export(self.mbd_get_keyring_file())
+
         mini_buildd.misc.call_sequence(self.mbd_get_sequence(), run_as_root=True)
-        self.mbd_msg_info(request, "Chroot {c}: Prepared on system for schroot.".format(c=self))
+        MsgLog(LOG, request).info("{c}: Prepared on system for schroot.".format(c=self))
 
-    def mbd_unprepare(self, request):
+    def mbd_remove(self, request):
         mini_buildd.misc.call_sequence(self.mbd_get_sequence(), rollback_only=True, run_as_root=True)
-        shutil.rmtree(self.mbd_get_path())
-        self.mbd_msg_info(request, "Chroot {c}: Removed from system.".format(c=self))
+        shutil.rmtree(self.mbd_get_path(),
+                      onerror=lambda f, p, e: MsgLog(LOG, request).warn("{c}: Failure removing data dir '{p}' (ignoring): {e}".format(c=self,
+                                                                                                                                      p=self.mbd_get_path(),
+                                                                                                                                      e=e)))
+        MsgLog(LOG, request).info("{c}: Removed from system.".format(c=self))
 
-    def mbd_check(self, _request):
-        mini_buildd.misc.call(["/usr/bin/schroot", "--chroot={c}".format(c=self.mbd_get_name()), "--info"])
+    def mbd_sync(self, request):
+        self._mbd_remove_and_prepare(request)
 
-    def mbd_get_status_dependencies(self):
+    def _mbd_schroot_run(self, args, namespace="chroot", user="root"):
+        return mini_buildd.misc.sose_call(["/usr/bin/schroot",
+                                           "--chroot={n}:{c}".format(n=namespace, c=self.mbd_get_name()),
+                                           "--user={u}".format(u=user)] +
+                                          args)
+
+    def mbd_backend_check(self, request):
+        "Subclasses may implement this to do extra backend checks."
+        MsgLog(LOG, request).info("{c}: No backend check implemented.".format(c=self))
+
+    def mbd_check(self, request):
+        # Basic function checks
+        self._mbd_schroot_run(["--info"])
+
+        # Note: When a schroot command comes back to fast, 'modern desktops' might still be busy
+        # scrutinizing the new devices schroot created, making schroot fail when closing
+        # them with something like
+        # '/var/lib/schroot/mount/mini-buildd-wheezy-amd64-aaba77f3-4cba-423e-b34f-2b2bbb9789e1: device is busy.'
+        # making this fail _and_ leave schroot cruft around.
+        # Wtf! Hence we now just skip this ls test for now.
+        #  self._mbd_schroot_run(["--directory=/", "--", "/bin/ls"])
+
+        # Backend checks
+        MsgLog(LOG, request).info("{c}: Running backend check.".format(c=self))
+        self.mbd_get_backend().mbd_backend_check(request)
+
+        # "apt update/upgrade" check
+        for args, fatal in [(["update"], True),
+                            (["--ignore-missing", "dist-upgrade"], True),
+                            (["--purge", "autoremove"], False),
+                            (["clean"], True)]:
+            try:
+                MsgLog(LOG, request).info("=> Running: apt-get {args}:".format(args=" ".join(args)))
+                MsgLog(LOG, request).log_text(
+                    self._mbd_schroot_run(["--directory=/", "--", "/usr/bin/apt-get", "-q", "-o APT::Install-Recommends=false", "--yes"] + args,
+                                          namespace="source"))
+            except:
+                MsgLog(LOG, request).warn("'apt-get {args}' not supported in this chroot.".format(args=" ".join(args)))
+                if fatal:
+                    raise
+
+    def mbd_get_dependencies(self):
         return [self.source]
 
 
@@ -189,6 +300,13 @@ See 'man 5 schroot.conf'
     class Admin(Chroot.Admin):
         fieldsets = Chroot.Admin.fieldsets + [("Dir options", {"fields": ("union_type",)})]
 
+        @classmethod
+        def mbd_meta_add_base_sources(cls, msglog):
+            cls._mbd_meta_add_base_sources(DirChroot, msglog)
+
+    def mbd_backend_flavor(self):
+        return self.get_union_type_display()
+
     def mbd_get_chroot_dir(self):
         return os.path.join(self.mbd_get_path(), "source")
 
@@ -198,10 +316,6 @@ type=directory
 directory={d}
 union-type={u}
 """.format(d=self.mbd_get_chroot_dir(), u=self.get_union_type_display())
-
-    def mbd_get_pre_sequence(self):
-        LOG.debug("No pre-squence for chroot {c}".format(c=self))
-        return []
 
     def mbd_get_post_sequence(self):
         return [
@@ -244,6 +358,13 @@ class FileChroot(Chroot):
     class Admin(Chroot.Admin):
         fieldsets = Chroot.Admin.fieldsets + [("File options", {"fields": ("compression",)})]
 
+        @classmethod
+        def mbd_meta_add_base_sources(cls, msglog):
+            cls._mbd_meta_add_base_sources(FileChroot, msglog)
+
+    def mbd_backend_flavor(self):
+        return self.TAR_SUFFIX[self.compression]
+
     def mbd_get_tar_file(self):
         return os.path.join(self.mbd_get_path(), "source." + self.TAR_SUFFIX[self.compression])
 
@@ -252,10 +373,6 @@ class FileChroot(Chroot):
 type=file
 file={t}
 """.format(t=self.mbd_get_tar_file())
-
-    def mbd_get_pre_sequence(self):
-        LOG.debug("No pre-squence for chroot {c}".format(c=self))
-        return []
 
     def mbd_get_post_sequence(self):
         return [
@@ -284,6 +401,13 @@ class LVMChroot(Chroot):
     class Admin(Chroot.Admin):
         fieldsets = Chroot.Admin.fieldsets + [("LVM options", {"fields": ("volume_group", "filesystem", "snapshot_size")})]
 
+        @classmethod
+        def mbd_meta_add_base_sources(cls, msglog):
+            cls._mbd_meta_add_base_sources(LVMChroot, msglog)
+
+    def mbd_backend_flavor(self):
+        return "lvm={grp}/{fs}/{size}G".format(grp=self.volume_group, fs=self.filesystem, size=self.snapshot_size)
+
     def mbd_get_volume_group(self):
         try:
             return self.looplvmchroot.mbd_get_volume_group()
@@ -306,7 +430,7 @@ lvm-snapshot-options=--size {s}G
             (["/sbin/lvcreate", "--size={s}G".format(s=self.snapshot_size), "--name={n}".format(n=self.mbd_get_name()), self.mbd_get_volume_group()],
              ["/sbin/lvremove", "--verbose", "--force", self.mbd_get_lvm_device()]),
 
-            (["/sbin/mkfs.{f}".format(f=self.filesystem), self.mbd_get_lvm_device()],
+            (["/sbin/mkfs", "-t{f}".format(f=self.filesystem), self.mbd_get_lvm_device()],
              []),
 
             (["/bin/mount", "-v", "-t{f}".format(f=self.filesystem), self.mbd_get_lvm_device(), self.mbd_get_tmp_dir()],
@@ -314,6 +438,11 @@ lvm-snapshot-options=--size {s}G
 
     def mbd_get_post_sequence(self):
         return [(["/bin/umount", "-v", self.mbd_get_tmp_dir()], [])]
+
+    def mbd_backend_check(self, request):
+        MsgLog(LOG, request).info("{c}: Running file system check...".format(c=self))
+        mini_buildd.misc.call(["/sbin/fsck", "-a", "-t{t}".format(t=self.filesystem), self.mbd_get_lvm_device()],
+                              run_as_root=True)
 
 
 class LoopLVMChroot(LVMChroot):
@@ -327,6 +456,14 @@ class LoopLVMChroot(LVMChroot):
     class Admin(LVMChroot.Admin):
         fieldsets = LVMChroot.Admin.fieldsets + [("Loop options", {"fields": ("loop_size",)})]
 
+        @classmethod
+        def mbd_meta_add_base_sources(cls, msglog):
+            cls._mbd_meta_add_base_sources(LoopLVMChroot, msglog)
+
+    def mbd_backend_flavor(self):
+        return "{size}G loop: {l}".format(size=self.loop_size,
+                                          l=super(LoopLVMChroot, self).mbd_backend_flavor())
+
     def mbd_get_volume_group(self):
         return "mini-buildd-loop-{d}-{a}".format(d=self.source.codename, a=self.architecture.name)
 
@@ -335,7 +472,7 @@ class LoopLVMChroot(LVMChroot):
 
     def mbd_get_loop_device(self):
         for f in glob.glob("/sys/block/loop[0-9]*/loop/backing_file"):
-            if os.path.realpath(open(f).read().strip()) == os.path.realpath(self.mbd_get_backing_file()):
+            if os.path.realpath(mini_buildd.misc.open_utf8(f).read().strip()) == os.path.realpath(self.mbd_get_backing_file()):
                 return "/dev/" + f.split("/")[3]
         LOG.debug("No existing loop device for {b}, searching for free device".format(b=self.mbd_get_backing_file()))
         return mini_buildd.misc.call(["/sbin/losetup", "--find"], run_as_root=True).rstrip()

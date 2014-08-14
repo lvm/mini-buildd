@@ -1,30 +1,45 @@
 [MESSAGES CONTROL]
 
-disable=C0111,C0301,
+# E1002: too many false-positives with django 1.5
+disable=E1002,
+        C0111,C0301,C0330,
         W0142,W0232,W0603,W0702,W0703,
-
+        I0011,
         R0401,W0621
+
+[REPORTS]
+reports=no
+msg-template={path}:{line}: [{msg_id}({symbol}), {obj}] {msg}
+
+[FORMAT]
+max-module-lines=1500
+
+[VARIABLES]
+dummy-variables-rgx=_|dummy
 
 [TYPECHECK]
 # see ./devel pylintgeneratedmembers
-generated-members=add,all,build_keyring_package_for,codename,create_default_layout,DoesNotExist,filechroot,get_status_display,id,looplvmchroot,lvmchroot,mandatory_architectures,mbd_get_apt_line,mbd_get_apt_pin,mbd_get_archive,mbd_get_default_version,mbd_get_mandatory_version_regex,mbd_id,objects,split,splitlines,suites,admin_site,suiteoption_set,suite,layout,uploadable,get_union_type_display mbd_unprepare
+generated-members=add,admin_site,all,architectureoption_set,chroot_set,source_set,origin,codename,distribution_set,DoesNotExist,get_status_display,get_union_type_display,id,layout,looplvmchroot,mbd_get_apt_line,mbd_get_apt_pin,mbd_get_archive,mbd_get_mandatory_version_regex,mbd_remove,mbd_unicode,objects,repository_set,splitlines,suite,suiteoption_set,uploadable,apt_keys,mbd_get_extra_option,mbd_model
 
 [BASIC]
 
-good-names=mini-buildd,urlpatterns,register
+good-names=mini-buildd,mini-buildd-tool,import-08x,urlpatterns,register
 variable-rgx=[a-z_][a-z0-9_]{0,30}$
-method-rgx=[a-z_][a-z0-9_]{2,40}$
+method-rgx=[a-z_][a-z0-9_]{1,40}$
+function-rgx=[a-z_][a-z0-9_]{1,40}$
+class-attribute-rgx=([A-Za-z_][A-Za-z0-9_]{2,40}|(__.*__))$
 
 [DESIGN]
 
 # Django adds many public methods to classes, FTPDHandler is the winner though
-max-public-methods=105
+max-public-methods=110
 min-public-methods=0
 
 # We need to pimp some default values a little
 max-args=10
 max-locals=30
-max-branchs=25
+max-returns=12
+max-branches=25
 max-attributes=15
 max-statements=60
 
