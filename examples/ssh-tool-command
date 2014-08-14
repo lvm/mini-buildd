@@ -1,0 +1,150 @@
+#!/usr/bin/python
+"""Script to use as a 'command' in an authorized_key file to allow mini-buildd-tool runs only via SSH.
+
+You may use this to authorize certain roles (for now: superuser and
+staff) via plain secure SSH.
+
+Steps to install:
+
+As user 'root'::
+
+  adduser --disabled-password mini-buildd-admin
+  adduser --disabled-password mini-buildd-staff
+  # OPTIONAL: Allows 'auth log' with the fingerprint
+  adduser mini-buildd-admin adm
+  adduser mini-buildd-staff adm
+
+As mini-buildd-[staff|uploader]::
+
+  Set up ~/.dput.cf with exactly one mini-buildd target.
+  Configure python-keyring to use a plaintext keyring, see "/usr/share/doc/mini-buildd/examples/keyringrc.cfg"
+  Run once to save the password:
+   $ mini-buildd-tool admin|staff@TARGET status
+
+As admin user at the mini-buildd instance (web app)::
+
+  Generate apropriate django pseudo users ("admin" does already exist).
+
+To authorize a SSH Key, as user mini-buildd-uploader, add a line like this::
+
+  command="/usr/share/doc/mini-buildd/examples/ssh-tool-command" ssh-rsa AA...
+
+per ssh user key.
+
+As SSH user::
+
+  Run 'ssh mini-buildd-[admin|staff]@your.host.name mini-buildd-tool -x -z -y
+"""
+from __future__ import print_function
+
+import sys
+import os
+import socket
+import subprocess
+import re
+import getpass
+import syslog
+
+
+# @TODO: Fix redundancy. auth_log code copied from ssh-uploader-command
+
+# Use syslog, facility user, to log access and key
+syslog.openlog(facility=syslog.LOG_USER)
+
+def auth_log(msg):
+    """
+    Uff. Dirty hack to get an 'auth' log including the ssh fingerprint.
+
+    Needs sshd on loglevel=VERBOSE, and the user needs access to
+    auth.log (i.e., add user to group 'adm' in standard Debian).
+    """
+    def getpppid():
+        "Get grandparent PID."
+        return subprocess.check_output("/bin/ps -p {ppid} -oppid=".format(ppid=os.getppid()), shell=True).strip()
+
+    def get_last_matching_line(file_name, regex):
+        result = None
+        with open(file_name) as f:
+            for line in f:
+                if re.match(regex, line):
+                    result = line
+        return result
+
+    def get_fingerprint():
+        try:
+            line = get_last_matching_line("/var/log/auth.log", "^.*sshd\[{pppid}\]: Found matching .* key: .*".format(pppid=getpppid()))
+            fp = line.rpartition(" ")[2].strip()
+        except:
+            fp = "NO_FINGERPRINT_FOUND"
+        return fp
+
+    command = os.environ.get("SSH_ORIGINAL_COMMAND", "NO_COMMAND_FOUND")
+    ip = os.environ.get("SSH_CONNECTION", "NO_IP_FOUND").partition(" ")[0]
+    try:
+        host = socket.gethostbyaddr(ip)[0]
+    except:
+        host = ip
+
+    syslog.syslog(syslog.LOG_NOTICE, "{msg}: [{user}] {fp}@{host} \"{command}\"".format(msg=msg,
+                                                                                        user=getpass.getuser(),
+                                                                                        host=host,
+                                                                                        fp=get_fingerprint(),
+                                                                                        command=command))
+
+
+def log(*args):
+    print(*args, file=sys.stderr)
+
+
+def get_dput_target():
+    return subprocess.check_output(r"grep --max-count=1 '^\[.*\]' ~/.dput.cf", shell=True).strip("\n[]")
+
+
+RETVAL = 0
+try:
+    MBD_USER = os.getenv("USER").split("-")[2]
+    MBD_TARGET = get_dput_target()
+
+    # Build up secure command to use from original command
+    ORIGINAL_COMMAND = os.environ.get("SSH_ORIGINAL_COMMAND", "").split()
+    log("I: Original command: ", ORIGINAL_COMMAND)
+    if not ORIGINAL_COMMAND or ORIGINAL_COMMAND[0] != "mini-buildd-tool":
+        raise Exception("You may only run mini-buildd-tool here.")
+    COMMAND = ["mini-buildd-tool", "{u}@{t}".format(u=MBD_USER, t=MBD_TARGET)] + ORIGINAL_COMMAND[1:]
+
+    # Run command
+    log("I: Running: ", COMMAND)
+    log("N: Some commands (like migrate) need a confirmation (but you will not see the prompt here).")
+    log("N: You may of course use '--confirm=CMD' directly to avoid the confirmation.")
+    log("N: IN CASE THIS STALLS HERE: Type '{c}<RETURN>' to continue.".format(c=ORIGINAL_COMMAND[1]))
+    log("---mini-buildd-tool---")
+    subprocess.check_call(COMMAND)
+
+    # Try to do the auth log
+    auth_log("SUCCESS")
+
+except Exception as e:
+    auth_log("FAILED")
+
+    log("""\
+----------------------------------------------------------------------
+*ERROR*: {e}
+
+You can only call me like this:
+
+ $ ssh {u}@{h} mini-buildd-tool [OPTIONS W/O TARGET...]
+
+It's recommended to update your shell config like so:
+
+ alias mbdt-{id}-{mu}="ssh {u}@{h} mini-buildd-tool"
+
+Examples (using sandbox repo "test"; see 'mini-buildd-tool --help'):
+
+ $ mbdt-{id}-{mu} migrate PACKAGE wheezy-test-unstable                           # (staff) Migrate a package to testing
+ $ mbdt-{id}-{mu} migrate PACKAGE wheezy-test-testing                            # (staff) Migrate a package to stable
+ $ mbdt-{id}-{mu} portext http://.../PACKAGE_0.0.5.dsc wheezy-test-experimental  # (staff) External port to experimental
+ $ mbdt-{id}-{mu} start|stop                                                     # (superuser) Start/stop mini-buildd
+    """.format(e=e, u=os.getenv("USER"), h=socket.getfqdn(), id=MBD_TARGET[12:], mu=MBD_USER))
+    RETVAL = 1
+
+sys.exit(RETVAL)

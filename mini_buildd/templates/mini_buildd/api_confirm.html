@@ -1,0 +1,25 @@
+{% extends "mini_buildd/api.html" %}
+
+{% block content %}
+	<div class="api_confirm">
+		<b>{{ api_cmd.COMMAND }}</b>
+		{% for k, v in api_cmd.args.items %}
+			{% if v %}
+				{{ k }}=<b>{{ v }}</b>
+			{% endif %}
+		{% endfor %}
+		<form action="/mini_buildd/api" method="get">
+			<div>
+				<input type="hidden" name="command" value="{{ api_cmd.COMMAND }}" />
+				{% for k, v in api_cmd.args.items %}
+					<input type="hidden" name="{{ k }}" value="{{ v }}" />
+				{% endfor %}
+				<input type="hidden" name="confirm" value="{{ api_cmd.COMMAND }}" />
+				{% if referer %}
+					<input type="hidden" name="output" value="referer{{ referer }}" />
+				{% endif %}
+				<input type="submit" value="Yes, run {{ api_cmd.COMMAND }}" title="Really run {{ api_cmd.COMMAND }}" />
+			</div>
+		</form>
+	</div>
+{% endblock %}

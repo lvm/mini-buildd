@@ -1,0 +1,37 @@
+{% extends "mini_buildd/base.html" %}
+{% load base %}
+
+{% block page_title %}Logs for: {{ repository }}/{{ package }}/{{ version }}{% endblock %}
+{% block mbd_page_footer %} &raquo; Logs for: {{ repository }}/{{ package }}/{{ version }}{% endblock %}
+
+{% block content %}
+	<div id="mbd_api">
+		<div class="box">
+			<h1 class="box-caption">Logs for: {{ repository }}/{{ package }}/{{ version }}</h1>
+			{% for key, values in logs %}
+				{% if values.changes %}
+					<h2 class="{{ key }}">{{ key }}</h2>
+					{% ifequal key "Failed" %}
+						<p>
+							<a class="button-rebuild"
+								 href="/mini_buildd/api?command=retry&amp;package={{ package|urlencode }}&amp;version={{ version|urlencode }}&amp;repository={{ repository|urlencode }}"
+								 title="Retry {{ repository }}/{{ package }}/{{ version }}">
+								Retry now
+							</a>
+						</p>
+					{% endifequal %}
+
+					<h3>Build logs</h3>
+					<p>
+						{% for arch, uri in values.buildlogs.items %}
+							<a title="Visit build logs for {{ arch }}" href="/log/{{ uri }}">{{ arch }}</a>
+						{% endfor %}
+					</p>
+
+					<h3><a title="Download changes for {{ repository }}/{{ package }}/{{ version }}" href="/log/{{ values.changes_path }}">Changes</a></h3>
+					<pre>{{ values.changes }}</pre>
+				{% endif %}
+			{% endfor %}
+		</div>
+	</div>
+{% endblock %}

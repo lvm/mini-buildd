@@ -1,0 +1,132 @@
+{% extends "mini_buildd/base.html" %}
+{% load base %}
+
+{% block title %}mini-buildd{% endblock %}
+{% block page_title %}{{ daemon.model.identity }}{% endblock %}
+{% block page_sub_title %}
+	{% if not daemon.is_busy %}
+		{% if daemon.is_running %}
+			<a class="button-stop" title="Stop" href="/mini_buildd/api?command=stop&amp;output=referer">Stop</a>
+		{% else %}
+			<a class="button-start" title="Start" href="/mini_buildd/api?command=start&amp;output=referer">Start</a>
+		{% endif %}
+	{% endif %}
+	<span class="status {% if daemon.is_busy %}busy{% elif daemon.is_running %}running{% else %}stopped{% endif %}">
+		{% if daemon.is_busy %}Busy...{% elif daemon.is_running %}Running{% else %}Stopped{% endif %}: {{ daemon.model }}
+	</span>
+{% endblock %}
+{% block mbd_page_footer %}
+	<a href="/mini_buildd/api?command=getkey">Archive Key</a>: <tt>{{ daemon.model.mbd_gnupg_long_id }}: {{ daemon.model.mbd_gnupg_fingerprint }}</tt>
+{% endblock %}
+
+{% block content %}
+	<div id="mbd_index_status">
+		<div id="mbd_index_repositories">
+			<div class="box">
+				<h1 class="box-caption">
+					{% if daemon.packages.items %}<img src="/static/img/progress_blue.gif" alt="Packaging..." title="Packaging..." style="margin: -5px 0 -5px 0; padding: 0" />{% endif %}
+					Packager: {{ daemon.packages|length }} packaging</h1>
+				{% if daemon.packages.items %}
+					{% include "mini_buildd/snippet_packager_status.html" with packages=daemon.packages.values %}
+				{% endif %}
+
+				<h2>Last packages: {{ daemon.last_packages|length }}
+					(<a id="mbd_last_packages_header" href="javascript:mbdToggleElement('mbd_last_packages','mbd_last_packages_header','hide','show')" >show</a>)
+				</h2>
+				<div id="mbd_last_packages">
+					{% if daemon.last_packages %}
+						{% include "mini_buildd/snippet_packager_status.html" with packages=daemon.last_packages %}
+					{% endif %}
+				</div>
+
+				<h2 title="Repositories in use">Repositories:
+					<a class="button-rebuild"
+						 href="/mini_buildd/api?command=meta&amp;model=repository.Repository&amp;function=build_keyring_packages&amp;output=referer"
+						 title="(Re-)Build keyring packages for all active repositories">Keyring packages</a>
+					<a class="button-rebuild"
+						 href="/mini_buildd/api?command=meta&amp;model=repository.Repository&amp;function=build_test_packages&amp;output=referer"
+						 title="(Re-)Build internal test packages for all active repositories">Test packages</a>
+				</h2>
+
+				<ul>
+					{% for r in repositories %}
+						<li>
+							<span class="status {{ r.get_status_display }}" title="{{ r.mbd_get_status_display }}">{{ r }}</span>
+							(<a title="Go to repository overview page" href="/mini_buildd/repositories/{{ r.identity }}/">Overview</a>)
+							{% if r.external_home_url %}
+								(<a href="{{ r.external_home_url }}" title="Link to the repository's external documentation">ExtHome</a>)
+							{% endif %}
+							(<a id="mbd_repository_{{ r.identity }}_portext_header" href="javascript:mbdToggleElement('mbd_repository_{{ r.identity }}_portext','mbd_repository_{{ r.identity }}_portext_header','Portext','Portext')" >Portext</a>)
+							<div id="mbd_repository_{{ r.identity }}_portext" style="display: none">
+								<form action="/mini_buildd/api" method="get">
+									<div>
+										<input type="hidden" name="command" value="portext" />
+										<input type="hidden" name="output" value="referer" />
+										<input name="dsc" type="text" size="80" title="URL of any Debian source package (dsc)" value="" />
+										<br />
+										<input id="mbd_portext_filter" type="text" title="Bulk-select distributions via regex" onchange="mbdSelectByRegex('mbd_portext_distributions', 'mbd_portext_filter')"/>
+										<br />
+										<select id="mbd_portext_distributions" name="distributions" multiple="multiple" size="10" title="Distribution(s) to port to">
+											{% mbd_distribution_options r uploadable=True %}
+										</select>
+										<br />
+										<input type="submit" value="Port external DSC" title="Port this external Debian Source package" />
+									</div>
+								</form>
+							</div>
+						</li>
+					{% empty %}
+						<li>No repositories.</li>
+					{% endfor %}
+				</ul>
+			</div>
+		</div>
+
+		<div id="mbd_index_chroots">
+			<div class="box">
+				<h1 class="box-caption">
+					{% if daemon.builds.items %}<img src="/static/img/progress_blue.gif" alt="Building..." title="Building..." style="margin: -5px 0 -5px 0; padding: 0" />{% endif %}
+					Builder: {{ daemon.build_queue }} building
+				</h1>
+				{% if daemon.builds.items %}
+					{% include "mini_buildd/snippet_builder_status.html" with builds=daemon.builds.values %}
+				{% endif %}
+
+				<h2>Last builds: {{ daemon.last_builds|length }}
+					(<a id="mbd_last_builds_header" href="javascript:mbdToggleElement('mbd_last_builds','mbd_last_builds_header','hide','show')" >show</a>)
+				</h2>
+				<div id="mbd_last_builds">
+					{% if daemon.last_builds %}
+						{% include "mini_buildd/snippet_builder_status.html" with builds=daemon.last_builds %}
+					{% endif %}
+				</div>
+
+				<h2 title="Chroots in use">Chroots:</h2>
+				<ul>
+					{% for c in chroots %}
+						<li><span class="status {{ c.get_status_display }}" title="{{ c.mbd_get_status_display }}">{{ c }}</span></li>
+					{% empty %}
+						<li>No chroots.</li>
+					{% endfor %}
+				</ul>
+			</div>
+		</div>
+
+		<div id="mbd_index_remotes">
+			<div class="box">
+				<h1 class="box-caption">Network: {{ remotes|length }} remotes</h1>
+				<h2 title="Remotes in use">Remotes:</h2>
+				<ul>
+					{% for r in remotes %}
+						<li>
+							<span class="status {{ r.get_status_display }}" title="{{ r.mbd_get_status_display }}">{{ r }}</span>
+							(<a title="Visit remote" href="http://{{ r.http }}/">Visit</a>)
+						</li>
+					{% empty %}
+						<li>No remotes.</li>
+					{% endfor %}
+				</ul>
+			</div>
+		</div>
+	</div>
+{% endblock %}

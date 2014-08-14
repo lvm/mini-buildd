@@ -1,0 +1,190 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+from __future__ import unicode_literals
+from __future__ import print_function
+
+import sys
+import os
+import locale
+import urllib
+import urllib2
+import argparse
+import ConfigParser
+import logging
+
+import argcomplete
+
+import mini_buildd.misc
+import mini_buildd.setup
+import mini_buildd.api
+
+LOG = logging.getLogger("mini_buildd")
+mini_buildd.misc.setup_console_logging(logging.DEBUG)
+
+
+# pylint: disable=W0613
+def host_completer(prefix, **kwargs):
+    hosts = []
+    dput_cf = ConfigParser.RawConfigParser()
+    dput_cf.read(os.path.expanduser("~/.dput.cf"))
+    for section in dput_cf.sections():
+        # pylint: disable=W0640
+        def _join(host, user):
+            if user:
+                return "{u}@{h}".format(u=user, h=host)
+            else:
+                return host
+
+        def _add(host, user=None):
+            if section.startswith("mini-buildd-"):
+                hosts.append(_join(section[12:], user))
+            else:
+                hosts.append(_join(section, user))
+
+        try:
+            host = dput_cf.get(section, "x_mini_buildd_host")
+            _add(host)
+            _add(host, "admin")
+            try:
+                users = dput_cf.get(section, "x_mini_buildd_users")
+                if not users:
+                    raise Exception()
+            except:
+                users = os.getenv("USER")
+            for u in users.split(" "):
+                _add(host, u)
+        except:
+            pass
+    return hosts
+# pylint: enable=W0613
+
+
+def host_from_dput(section):
+    dput_cf = ConfigParser.RawConfigParser()
+    dput_cf.read(os.path.expanduser("~/.dput.cf"))
+    try:
+        return dput_cf.get("mini-buildd-" + section, "x_mini_buildd_host")
+    except:
+        return dput_cf.get(section, "x_mini_buildd_host")
+
+PARSER = argparse.ArgumentParser(prog="mini-buildd-tool",
+                                 description="Command line tool to run API calls.",
+                                 epilog="Note: Uses 'python-keyring' to persist passwords (see '~/.local/share/python_keyring/')",
+                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+
+PARSER.add_argument("--version", action="version", version=mini_buildd.__version__)
+PARSER.add_argument("-v", "--verbose", dest="verbosity", action="count", default=0,
+                    help="lower log level. Give twice for max logs")
+PARSER.add_argument("-q", "--quiet", dest="terseness", action="count", default=0,
+                    help="tighten log level. Give twice for min logs")
+PARSER.add_argument("-O", "--output", action="store",
+                    default="plain", choices=["plain", "html", "python"],
+                    help="output type")
+PARSER.add_argument("-R", "--reset-save-policy", action="store_true",
+                    help="reset save policy of used keyring (to 'ask')")
+PARSER.add_argument("-P", "--protocol", action="store",
+                    default="http", choices=["http", "https"],
+                    help="protocol to use. Note: mini-buildd 1.0.x only speaks http -- you may use this in case you have manually set up a https proxy, though.")
+PARSER.add_argument("host", action="store",
+                    metavar="HOST",
+                    help="target host, either '[user@]host:port', or '[user@]DPUT_TARGET'").completer = host_completer
+
+
+def print_daemon_messages(headers, host):
+    "Output daemon messages to stderr"
+    msgs_header = "x-mini-buildd-message"
+    for msg in [v for k, v in headers.items() if msgs_header == k[:len(msgs_header)]]:
+        # msg line in unicode, use preferred encoding for print only (avoid mixing unicode/str in .format)
+        msg_line = "[{h}] {m}".format(h=host, m=mini_buildd.misc.b642u(msg))
+        print(msg_line.encode(locale.getpreferredencoding(), "backslashreplace"), file=sys.stderr)
+    print("", file=sys.stderr)
+
+
+def cmd_call(args):
+    # Compute actual user and host to use: '[user@]host:port' or '[user@]DPUT_TARGET'
+    user, dummy, host = args.host.rpartition("@")
+    try:
+        host = host_from_dput(host)
+    except:
+        pass
+
+    # Log in if user given explicitely, or required by the command
+    if user or args.command_class.AUTH != mini_buildd.api.Command.NONE:
+        mini_buildd.misc.web_login(host, user, KEYRING)
+
+    # Compute api call parameters
+    http_args = {}
+    for k in [k for k in args.__dict__.keys() if k not in ["terseness", "verbosity", "host", "reset_save_policy", "protocol", "command_class", "func"]]:
+        http_args[k] = args.__dict__[k]
+
+    # Confirm if required by this call
+    if args.command_class.CONFIRM:
+        if not http_args["confirm"]:
+            http_args["confirm"] = raw_input("Repeat command name '{c}' to confirm: ".format(c=args.command_class.COMMAND))
+        if not http_args["confirm"]:
+            raise Exception("{c}: Not confirmed, skipped.".format(c=args.command))
+
+    # Do the api call
+    call_url = "{p}://{b}/mini_buildd/api?{a}".format(p=args.protocol, b=host, a=urllib.urlencode(http_args))
+    LOG.info("API call URL: {u}".format(u=call_url))
+    response = urllib2.urlopen(call_url)
+
+    # Output daemon messages to stderr
+    print_daemon_messages(response.headers, args.host)
+
+    # Output result to stdout
+    result = response.read()
+    if sys.stdout.isatty() and http_args["output"] == "plain":
+        # On plain output to a tty, try to encode to the preferred locale
+        encoding = response.headers["content-type"].partition("charset=")[2]
+        sys.stdout.write(unicode(result, encoding if encoding else "UTF-8").encode(locale.getpreferredencoding(), "backslashreplace"))
+    else:
+        sys.stdout.write(result)
+
+
+# Unfortunaetely, we cannot group the commands (yet), see http://bugs.python.org/issue14037
+SUBPARSERS = PARSER.add_subparsers(title="API commands")
+for cmd, cmd_cls in mini_buildd.api.COMMANDS:
+    if cmd != mini_buildd.api.COMMAND_GROUP:
+        cmd_parser = SUBPARSERS.add_parser(cmd, help=cmd_cls.__doc__)
+        for cmd_args, cmd_kvargs in cmd_cls.ARGUMENTS:
+            cmd_parser.add_argument(*cmd_args, **cmd_kvargs)
+
+        if cmd_cls.CONFIRM:
+            cmd_parser.add_argument("--confirm", action="store", default="", metavar="COMMAND",
+                                    help="this command needs user confirmation; this option allows to force-bypass that, by explicitly repeating the command")
+
+        cmd_parser.set_defaults(func=cmd_call, command=cmd, command_class=cmd_cls)
+
+
+# Parse and run
+argcomplete.autocomplete(PARSER)
+ARGS = PARSER.parse_args()
+LOG.setLevel(logging.WARNING - (10 * (min(2, ARGS.verbosity) - min(2, ARGS.terseness))))
+
+if LOG.getEffectiveLevel() <= logging.DEBUG:
+    mini_buildd.setup.DEBUG = ["exception"]
+mini_buildd.misc.clone_log("keyring")
+
+try:
+    # Convenience: If the old creds file is around, remove it
+    OLD_CREDS_FILE = os.path.join(os.getenv("HOME"), ".mini-buildd-tool.credentials")
+    if os.path.exists(OLD_CREDS_FILE):
+        os.remove(OLD_CREDS_FILE)
+        LOG.warn("Obsoleted creds file removed: {f}".format(f=OLD_CREDS_FILE))
+
+    # Generate global keyring object
+    KEYRING = mini_buildd.misc.Keyring("mini-buildd")
+    if ARGS.reset_save_policy:
+        KEYRING.reset_save_policy()
+
+    # Run the command
+    ARGS.func(ARGS)
+
+except urllib2.HTTPError as e:
+    print_daemon_messages(e.headers, ARGS.host)
+    mini_buildd.setup.log_exception(LOG, ARGS.host, e)
+    sys.exit(1)
+except Exception as e:
+    mini_buildd.setup.log_exception(LOG, "{u}".format(u=ARGS.host), e)
+    sys.exit(2)
